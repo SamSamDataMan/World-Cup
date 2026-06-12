@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import json
+import re
+from collections import defaultdict
 from datetime import datetime
+from datetime import timedelta
 from html import escape
+from html import unescape
+from urllib.request import Request
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -10,6 +17,9 @@ import streamlit as st
 EASTERN = ZoneInfo("America/New_York")
 FIXTURE_SOURCE_URL = "https://www.fourfourtwo.com/competition/world-cup-2026-fixtures-and-results"
 TV_SOURCE_URL = "https://www.sbnation.com/soccer/1117513/world-cup-schedule-2026-how-to-watch-every-match-scores-and-more"
+SCORE_SOURCE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260627&limit=200"
+NO_SWEEP_MEME_URL = "https://i.kym-cdn.com/photos/images/newsfeed/000/538/462/358.jpg"
+TITLE_ODDS_SOURCE_URL = "https://www.fourfourtwo.com/competition/world-cup-2026-sweepstakes-kit-download-and-print-our-sweepstake-template"
 
 POOL_DRAW = {
     "Sam": [
@@ -74,6 +84,83 @@ POOL_DRAW = {
 
 OWNER_BY_TEAM = {
     team: owner for owner, teams in POOL_DRAW.items() for team in teams
+}
+
+PLAYER_COLORS = {
+    "Sam": "#d6ff79",
+    "Rob": "#7bdff2",
+    "Jerry": "#ffb703",
+    "David": "#ff8fab",
+    "Steve": "#b8f2e6",
+    "Unclaimed": "#d7ded5",
+}
+
+TEAM_ALIASES = {
+    "Bosnia-Herzegovina": "Bosnia and Herzegovina",
+    "Cabo Verde": "Cape Verde",
+    "Cape Verde": "Cape Verde",
+    "Congo DR": "DR Congo",
+    "Cote d'Ivoire": "Ivory Coast",
+    "Côte d’Ivoire": "Ivory Coast",
+    "Côte d'Ivoire": "Ivory Coast",
+    "Curaçao": "Curacao",
+    "Curacao": "Curacao",
+    "Korea Republic": "South Korea",
+    "Türkiye": "Turkey",
+    "Turkiye": "Turkey",
+    "USA": "United States",
+    "USMNT": "United States",
+}
+
+FALLBACK_TITLE_ODDS = {
+    "Spain": "4/1",
+    "France": "9/2",
+    "England": "6/1",
+    "Brazil": "8/1",
+    "Argentina": "8/1",
+    "Portugal": "10/1",
+    "Germany": "14/1",
+    "Netherlands": "20/1",
+    "Norway": "25/1",
+    "Belgium": "33/1",
+    "Colombia": "33/1",
+    "United States": "40/1",
+    "Morocco": "40/1",
+    "Japan": "50/1",
+    "Uruguay": "50/1",
+    "Czechia": "50/1",
+    "Mexico": "66/1",
+    "Croatia": "66/1",
+    "Switzerland": "66/1",
+    "Sweden": "66/1",
+    "Ecuador": "66/1",
+    "Senegal": "66/1",
+    "Turkey": "66/1",
+    "Austria": "100/1",
+    "Ivory Coast": "100/1",
+    "South Korea": "100/1",
+    "Egypt": "150/1",
+    "Canada": "150/1",
+    "Paraguay": "150/1",
+    "Australia": "200/1",
+    "Bosnia and Herzegovina": "200/1",
+    "Iran": "250/1",
+    "Scotland": "250/1",
+    "DR Congo": "250/1",
+    "Algeria": "250/1",
+    "Saudi Arabia": "300/1",
+    "Ghana": "300/1",
+    "Tunisia": "300/1",
+    "South Africa": "400/1",
+    "Panama": "400/1",
+    "Cape Verde": "500/1",
+    "Uzbekistan": "500/1",
+    "Qatar": "500/1",
+    "Iraq": "500/1",
+    "Jordan": "500/1",
+    "Curacao": "1000/1",
+    "Haiti": "1000/1",
+    "New Zealand": "1000/1",
 }
 
 SCHEDULE = [
@@ -165,7 +252,7 @@ def format_kickoff(kickoff: datetime) -> str:
 
 
 def format_day(kickoff: datetime) -> str:
-    return f"{kickoff:%A}, {kickoff:%B} {kickoff.day}"
+    return f"{kickoff:%A} {kickoff:%B} {kickoff.day}"
 
 
 def format_time(kickoff: datetime) -> str:
@@ -174,16 +261,201 @@ def format_time(kickoff: datetime) -> str:
     return f"{hour}:{kickoff.minute:02d} {am_pm} ET"
 
 
+def format_tv(network: str) -> str:
+    return "Fox" if network.upper() == "FOX" else network
+
+
+def canonical_team_name(team: str) -> str:
+    cleaned = unescape(team).replace("\xa0", " ").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return TEAM_ALIASES.get(cleaned, cleaned)
+
+
 def owner(team: str) -> str:
     return OWNER_BY_TEAM.get(team, "Unclaimed")
 
 
-def team_badge(team: str) -> str:
-    return f"{escape(team)} <span>{escape(owner(team))}</span>"
+def player_avatar(person: str) -> str:
+    return escape(person[:1].upper())
 
 
-def group_play_record(team: str) -> str:
-    return "0-0-0"
+def player_pill(person: str) -> str:
+    color = PLAYER_COLORS.get(person, PLAYER_COLORS["Unclaimed"])
+    return (
+        f'<div class="player-pill" style="--avatar-color: {color};">'
+        f'<span class="player-avatar">{player_avatar(person)}</span>'
+        f"<span>{escape(person)}</span>"
+        "</div>"
+    )
+
+
+def blank_record() -> dict[str, int]:
+    return {
+        "played": 0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 0,
+        "gf": 0,
+        "ga": 0,
+        "gd": 0,
+        "points": 0,
+    }
+
+
+def score_key(team_a: str, team_b: str) -> frozenset[str]:
+    return frozenset({canonical_team_name(team_a), canonical_team_name(team_b)})
+
+
+def parse_scores_from_espn(payload: dict[str, object]) -> dict[frozenset[str], dict[str, object]]:
+    scores = {}
+    for event in payload.get("events", []):
+        competitions = event.get("competitions") or []
+        if not competitions:
+            continue
+        competition = competitions[0]
+        competitors = competition.get("competitors") or []
+        if len(competitors) != 2:
+            continue
+
+        status = competition.get("status") or {}
+        status_type = status.get("type") or {}
+        state = status_type.get("state", "pre")
+        completed = bool(status_type.get("completed"))
+        status_label = (
+            status_type.get("shortDetail")
+            or status_type.get("detail")
+            or status_type.get("description")
+            or state.title()
+        )
+
+        teams = []
+        for competitor in competitors:
+            team = competitor.get("team") or {}
+            team_name = canonical_team_name(
+                team.get("displayName") or team.get("shortDisplayName") or ""
+            )
+            if not team_name:
+                continue
+            teams.append(
+                {
+                    "team": team_name,
+                    "score": int(competitor.get("score") or 0),
+                }
+            )
+        if len(teams) != 2:
+            continue
+
+        scores[score_key(teams[0]["team"], teams[1]["team"])] = {
+            "team_a": teams[0]["team"],
+            "team_b": teams[1]["team"],
+            "score_a": teams[0]["score"],
+            "score_b": teams[1]["score"],
+            "state": state,
+            "completed": completed,
+            "status_label": status_label,
+        }
+    return scores
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_live_scores() -> tuple[dict[frozenset[str], dict[str, object]], str | None]:
+    try:
+        request = Request(
+            SCORE_SOURCE_URL,
+            headers={"User-Agent": "Mozilla/5.0 World Cup Pool Tracker"},
+        )
+        with urlopen(request, timeout=8) as response:
+            payload = json.load(response)
+    except Exception as exc:
+        return {}, f"Could not refresh live scores from ESPN: {exc}"
+
+    return parse_scores_from_espn(payload), None
+
+
+def parse_fractional_odds(odds_text: str) -> float | None:
+    cleaned = odds_text.replace(",", "").strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)/(\d+(?:\.\d+)?)", cleaned)
+    if not match:
+        return None
+    numerator = float(match.group(1))
+    denominator = float(match.group(2))
+    if denominator <= 0:
+        return None
+    return denominator / (numerator + denominator)
+
+
+def format_pool_chance(probability: float) -> str:
+    if probability >= 0.1:
+        return f"{probability * 100:.1f}%"
+    return f"{probability * 100:.2f}%"
+
+
+def parse_title_odds_from_html(html: str) -> dict[str, str]:
+    odds: dict[str, str] = {}
+    text = unescape(re.sub(r"<[^>]+>", " ", html))
+    pattern = re.compile(
+        r"\b\d+\s*-\s*([A-Za-z][A-Za-z\s.&'\u00c0-\u017f]+?)\s*\(([\d,]+(?:\.\d+)?/\d+)\)"
+    )
+    for raw_team, raw_odds in pattern.findall(text):
+        team = canonical_team_name(re.sub(r"\s+", " ", raw_team).strip())
+        if team in OWNER_BY_TEAM:
+            odds[team] = raw_odds.replace(",", "")
+    return odds
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_title_odds() -> tuple[dict[str, str], dict[str, object]]:
+    fallback_meta: dict[str, object] = {
+        "message": None,
+        "fallback_teams": set(),
+    }
+    try:
+        request = Request(
+            TITLE_ODDS_SOURCE_URL,
+            headers={"User-Agent": "Mozilla/5.0 World Cup Pool Tracker"},
+        )
+        with urlopen(request, timeout=8) as response:
+            html = response.read().decode("utf-8", errors="replace")
+        odds = parse_title_odds_from_html(html)
+    except Exception as exc:
+        fallback_meta["message"] = (
+            f"Could not refresh title odds from FourFourTwo; using saved odds: {exc}"
+        )
+        fallback_meta["fallback_teams"] = set(FALLBACK_TITLE_ODDS)
+        return FALLBACK_TITLE_ODDS.copy(), fallback_meta
+
+    missing = set(OWNER_BY_TEAM) - set(odds)
+    if missing:
+        odds.update({team: FALLBACK_TITLE_ODDS[team] for team in missing})
+        fallback_meta["message"] = (
+            "FourFourTwo odds were missing "
+            f"{', '.join(sorted(missing))}; filled from saved odds."
+        )
+        fallback_meta["fallback_teams"] = missing
+    return odds, fallback_meta
+
+
+def build_title_odds_table(odds: dict[str, str]) -> dict[str, dict[str, object]]:
+    implied = {
+        team: probability
+        for team, odds_text in odds.items()
+        if (probability := parse_fractional_odds(odds_text)) is not None
+    }
+    total = sum(implied.values()) or 1
+    return {
+        team: {
+            "odds": odds[team],
+            "implied": probability,
+            "normalized": probability / total,
+        }
+        for team, probability in implied.items()
+    }
+
+
+def player_title_chance(
+    teams: list[str], title_odds: dict[str, dict[str, object]]
+) -> float:
+    return sum(float(title_odds.get(team, {}).get("normalized", 0)) for team in teams)
 
 
 def build_matches() -> list[dict[str, object]]:
@@ -205,11 +477,145 @@ def build_matches() -> list[dict[str, object]]:
                 "owner_a": owner_a,
                 "owner_b": owner_b,
                 "tv": tv,
+                "score_a": None,
+                "score_b": None,
+                "status": "scheduled",
+                "status_label": None,
                 "owners": {owner_a, owner_b},
                 "teams": {team_a, team_b},
             }
         )
     return matches
+
+
+def infer_time_status(kickoff: datetime) -> str:
+    now_et = datetime.now(EASTERN)
+    if now_et < kickoff:
+        return "scheduled"
+    if now_et <= kickoff + timedelta(hours=3):
+        return "live"
+    return "scheduled"
+
+
+def enrich_matches_with_scores(
+    matches: list[dict[str, object]],
+    score_results: dict[frozenset[str], dict[str, object]],
+) -> list[dict[str, object]]:
+    enriched_matches = []
+    for match in matches:
+        enriched = dict(match)
+        result = score_results.get(score_key(str(match["team_a"]), str(match["team_b"])))
+        if result:
+            if canonical_team_name(str(match["team_a"])) == result["team_a"]:
+                enriched["score_a"] = result["score_a"]
+                enriched["score_b"] = result["score_b"]
+            else:
+                enriched["score_a"] = result["score_b"]
+                enriched["score_b"] = result["score_a"]
+            enriched["status_label"] = result.get("status_label")
+            if result.get("completed") or result.get("state") == "post":
+                enriched["status"] = "final"
+            elif result.get("state") == "in":
+                enriched["status"] = "live"
+            else:
+                enriched["status"] = infer_time_status(enriched["kickoff"])
+        else:
+            enriched["status"] = infer_time_status(enriched["kickoff"])
+        enriched_matches.append(enriched)
+    return enriched_matches
+
+
+def build_records(matches: list[dict[str, object]]) -> dict[str, dict[str, int]]:
+    records = defaultdict(blank_record)
+    for match in matches:
+        if match["status"] != "final":
+            continue
+        team_a = str(match["team_a"])
+        team_b = str(match["team_b"])
+        score_a = int(match["score_a"])
+        score_b = int(match["score_b"])
+
+        records[team_a]["played"] += 1
+        records[team_b]["played"] += 1
+        records[team_a]["gf"] += score_a
+        records[team_a]["ga"] += score_b
+        records[team_b]["gf"] += score_b
+        records[team_b]["ga"] += score_a
+
+        if score_a > score_b:
+            records[team_a]["wins"] += 1
+            records[team_a]["points"] += 3
+            records[team_b]["losses"] += 1
+        elif score_b > score_a:
+            records[team_b]["wins"] += 1
+            records[team_b]["points"] += 3
+            records[team_a]["losses"] += 1
+        else:
+            records[team_a]["draws"] += 1
+            records[team_b]["draws"] += 1
+            records[team_a]["points"] += 1
+            records[team_b]["points"] += 1
+
+    all_teams = {team for match in matches for team in (match["team_a"], match["team_b"])}
+    for team in all_teams:
+        records[str(team)]["gd"] = records[str(team)]["gf"] - records[str(team)]["ga"]
+    return dict(records)
+
+
+def format_record(record: dict[str, int]) -> str:
+    return f'{record["wins"]}-{record["draws"]}-{record["losses"]}'
+
+
+def format_record_detail(record: dict[str, int]) -> str:
+    gd = record["gd"]
+    gd_text = f"+{gd}" if gd > 0 else str(gd)
+    return f'{format_record(record)} - {record["points"]} pts - GD {gd_text}'
+
+
+def sweep_status(record: dict[str, int]) -> dict[str, object]:
+    wins = record["wins"]
+    impossible = record["draws"] > 0 or record["losses"] > 0
+    if impossible:
+        return {
+            "label": "Sweep impossible",
+            "class": "is-dead",
+            "progress": 0,
+            "width": "100%",
+        }
+    return {
+        "label": f"Sweep {wins}/3",
+        "class": "is-live",
+        "progress": wins,
+        "width": f"{min(wins, 3) / 3 * 100:.0f}%",
+    }
+
+
+def sweep_meter(record: dict[str, int]) -> str:
+    status = sweep_status(record)
+    label = escape(str(status["label"]))
+    copy_html = (
+        '<div class="sweep-meme" aria-label="No sweep for you">'
+        f'<img src="{NO_SWEEP_MEME_URL}" alt="No sweep for you meme">'
+        '<span>No sweep for you!!!</span>'
+        "</div>"
+        if status["class"] == "is-dead"
+        else f'<div class="sweep-copy"><span>{label}</span></div>'
+    )
+    ticks = "".join(
+        '<span class="sweep-tick is-filled"></span>'
+        if index < int(status["progress"])
+        else '<span class="sweep-tick"></span>'
+        for index in range(3)
+    )
+    return (
+        f'<div class="sweep-meter {status["class"]}">'
+        f"{copy_html}"
+        '<div class="sweep-track">'
+        f'<div class="sweep-fill" style="width: {status["width"]};"></div>'
+        f"{ticks}"
+        "</div>"
+        "</div>"
+    )
 
 
 def build_groups(matches: list[dict[str, object]]) -> dict[str, list[str]]:
@@ -221,6 +627,25 @@ def build_groups(matches: list[dict[str, object]]) -> dict[str, list[str]]:
             if team not in groups[group]:
                 groups[group].append(team)
     return dict(sorted(groups.items()))
+
+
+def build_group_standings(
+    matches: list[dict[str, object]], records: dict[str, dict[str, int]]
+) -> dict[str, list[str]]:
+    groups = build_groups(matches)
+    standings = {}
+    for group, teams in groups.items():
+        original_order = {team: index for index, team in enumerate(teams)}
+        standings[group] = sorted(
+            teams,
+            key=lambda team: (
+                -records.get(team, blank_record())["points"],
+                -records.get(team, blank_record())["gd"],
+                -records.get(team, blank_record())["gf"],
+                original_order[team],
+            ),
+        )
+    return standings
 
 
 def group_matches_by_day(
@@ -322,8 +747,8 @@ def inject_styles() -> None:
             overflow: hidden;
             border: 1px solid rgba(16, 35, 28, 0.12);
             border-radius: 24px;
-            padding: 1.15rem 1.25rem;
-            margin: 0.85rem 0;
+            padding: 1.05rem 1.2rem 1.15rem;
+            margin: 0.65rem 0;
             background: rgba(255, 255, 255, 0.78);
             box-shadow: 0 18px 42px rgba(16, 35, 28, 0.10);
             backdrop-filter: blur(10px);
@@ -341,68 +766,106 @@ def inject_styles() -> None:
             display: flex;
             flex-wrap: wrap;
             gap: 0.55rem;
-            color: rgba(16, 35, 28, 0.68);
+            color: rgba(16, 35, 28, 0.62);
             font-size: 0.9rem;
-            font-weight: 700;
+            font-weight: 900;
             text-transform: uppercase;
             letter-spacing: 0.08em;
         }
 
         .day-header {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.65rem;
-            margin: 2rem 0 0.25rem;
-            border-radius: 999px;
-            padding: 0.55rem 0.85rem;
-            background: rgba(16, 35, 28, 0.92);
-            color: white;
+            margin: 2rem 0 0.45rem;
+            color: rgba(16, 35, 28, 0.52);
             font-family: 'Bricolage Grotesque', Georgia, serif;
             font-weight: 800;
-            letter-spacing: 0.02em;
-            box-shadow: 0 14px 32px rgba(16, 35, 28, 0.14);
-        }
-
-        .day-header span {
-            border-radius: 999px;
-            padding: 0.18rem 0.5rem;
-            background: var(--lime);
-            color: #10231c;
-            font-size: 0.8rem;
+            font-size: 1.05rem;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.06em;
         }
 
         .match-title {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
             font-size: clamp(1.3rem, 3vw, 2rem);
             font-weight: 800;
-            margin: 0.45rem 0 0.75rem;
+            margin: 0.38rem 0 0.85rem;
         }
 
-        .team-row {
+        .group-dot {
+            display: inline-grid;
+            place-items: center;
+            flex: 0 0 auto;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 999px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 900;
+            box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.16);
+        }
+
+        .matchup-text {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.55rem;
+        }
+
+        .score-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            padding: 0.16rem 0.58rem;
+            background: #10231c;
+            color: var(--lime);
+            font-size: 0.95rem;
+            font-weight: 900;
+            letter-spacing: 0.04em;
+        }
+
+        .group-a { background: #d94141; }
+        .group-b { background: #2563eb; }
+        .group-c { background: #0f9f6e; }
+        .group-d { background: #f97316; }
+        .group-e { background: #7c3aed; }
+        .group-f { background: #0891b2; }
+        .group-g { background: #be123c; }
+        .group-h { background: #4d7c0f; }
+        .group-i { background: #9333ea; }
+        .group-j { background: #0369a1; }
+        .group-k { background: #ca8a04; }
+        .group-l { background: #475569; }
+
+        .player-row {
             display: flex;
             flex-wrap: wrap;
             align-items: center;
-            gap: 0.65rem;
+            gap: 0.55rem;
         }
 
-        .team-pill {
+        .player-pill {
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 0.42rem;
             border-radius: 999px;
-            padding: 0.52rem 0.78rem;
+            padding: 0.28rem 0.68rem 0.28rem 0.28rem;
             background: #10231c;
             color: white;
             font-weight: 800;
         }
 
-        .team-pill span {
+        .player-avatar {
+            display: inline-grid;
+            place-items: center;
+            width: 1.7rem;
+            height: 1.7rem;
             border-radius: 999px;
-            padding: 0.16rem 0.48rem;
-            background: var(--lime);
+            background: var(--avatar-color);
             color: #10231c;
             font-size: 0.78rem;
+            font-weight: 900;
         }
 
         .versus {
@@ -437,9 +900,9 @@ def inject_styles() -> None:
 
         .team-line {
             display: grid;
-            grid-template-columns: 1fr auto;
+            grid-template-columns: auto minmax(0, 1fr);
             gap: 0.75rem;
-            align-items: center;
+            align-items: start;
             border-top: 1px solid rgba(16, 35, 28, 0.10);
             padding: 0.65rem 0;
         }
@@ -448,8 +911,24 @@ def inject_styles() -> None:
             border-top: 0;
         }
 
+        .team-summary {
+            min-width: 0;
+        }
+
+        .team-topline {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+
+        .team-identity {
+            min-width: 0;
+        }
+
         .team-name {
             font-weight: 800;
+            line-height: 1.15;
         }
 
         .team-owner {
@@ -459,26 +938,207 @@ def inject_styles() -> None:
 
         .record-pill {
             border-radius: 999px;
-            padding: 0.25rem 0.55rem;
+            padding: 0.24rem 0.56rem;
             background: var(--lime);
             color: #10231c;
             font-weight: 900;
-            font-size: 0.85rem;
+            font-size: 0.72rem;
+            white-space: nowrap;
+            line-height: 1;
+            margin-top: 0.12rem;
+        }
+
+        .sweep-meter {
+            width: min(100%, 14rem);
+            margin-top: 0.45rem;
+        }
+
+        .sweep-copy {
+            display: flex;
+            justify-content: flex-start;
+            color: rgba(16, 35, 28, 0.66);
+            font-size: 0.78rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 0.25rem;
+        }
+
+        .sweep-meme {
+            position: relative;
+            width: 4.6rem;
+            height: 3.15rem;
+            margin: -0.15rem auto 0.18rem;
+            overflow: hidden;
+            border-radius: 0.55rem;
+            border: 2px solid rgba(255, 255, 255, 0.86);
+            box-shadow: 0 5px 12px rgba(16, 35, 28, 0.16);
+            background: #10231c;
+        }
+
+        .sweep-meme img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+
+        .sweep-meme span {
+            position: absolute;
+            inset: auto 0.18rem 0.12rem;
+            color: #ffffff;
+            font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif;
+            font-size: 0.48rem;
+            line-height: 0.9;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            text-shadow:
+                -1px -1px 0 #000,
+                1px -1px 0 #000,
+                -1px 1px 0 #000,
+                1px 1px 0 #000;
+        }
+
+        .sweep-track {
+            position: relative;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.3rem;
+            overflow: hidden;
+            border-radius: 999px;
+            padding: 0.18rem;
+            background: rgba(16, 35, 28, 0.10);
+        }
+
+        .sweep-fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            border-radius: inherit;
+            background: rgba(214, 255, 121, 0.95);
+            transition: width 240ms ease;
+        }
+
+        .sweep-tick {
+            position: relative;
+            z-index: 1;
+            height: 0.46rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.66);
+            border: 1px solid rgba(16, 35, 28, 0.10);
+        }
+
+        .sweep-tick.is-filled {
+            background: #10231c;
+        }
+
+        .sweep-meter.is-dead .sweep-fill {
+            background: rgba(16, 35, 28, 0.16);
+        }
+
+        .sweep-meter.is-dead .sweep-copy {
+            color: rgba(16, 35, 28, 0.42);
+        }
+
+        .sweep-meter.is-dead .sweep-track {
+            opacity: 0.86;
+        }
+
+        .sweep-meter.is-dead .sweep-tick {
+            background: rgba(16, 35, 28, 0.18);
+        }
+
+        @media (max-width: 760px) {
+            .team-topline {
+                flex-direction: column;
+                gap: 0.35rem;
+            }
+
+            .record-pill {
+                align-self: flex-start;
+            }
         }
 
         .player-teams {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
+            display: grid;
+            gap: 0.55rem;
         }
 
         .player-team {
-            border-radius: 999px;
-            padding: 0.45rem 0.65rem;
-            background: #10231c;
-            color: white;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 0.7rem;
+            align-items: center;
+            border-radius: 16px;
+            padding: 0.62rem 0.7rem;
+            background: rgba(16, 35, 28, 0.06);
+            border: 1px solid rgba(16, 35, 28, 0.08);
+        }
+
+        .player-team-name {
+            color: #10231c;
+            font-weight: 900;
+            line-height: 1.1;
+        }
+
+        .player-team-chance {
+            color: rgba(16, 35, 28, 0.58);
+            font-size: 0.8rem;
             font-weight: 800;
-            font-size: 0.92rem;
+        }
+
+        .odds-pill {
+            border-radius: 999px;
+            padding: 0.35rem 0.58rem;
+            background: #10231c;
+            color: #ffffff;
+            font-size: 0.82rem;
+            font-weight: 900;
+            white-space: nowrap;
+        }
+
+        .player-card-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 0.9rem;
+        }
+
+        .player-card-head h3 {
+            margin-bottom: 0.15rem;
+        }
+
+        .pool-chance {
+            min-width: 6rem;
+            border-radius: 18px;
+            padding: 0.55rem 0.7rem;
+            background: var(--lime);
+            color: #10231c;
+            text-align: right;
+            box-shadow: inset 0 0 0 1px rgba(16, 35, 28, 0.08);
+        }
+
+        .pool-chance span {
+            display: block;
+            color: rgba(16, 35, 28, 0.58);
+            font-size: 0.68rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .pool-chance strong {
+            display: block;
+            font-size: 1.3rem;
+            line-height: 1;
+        }
+
+        .odds-source {
+            margin-top: 1rem;
+            color: rgba(16, 35, 28, 0.56);
+            font-size: 0.86rem;
+            font-weight: 700;
         }
         </style>
         """,
@@ -490,19 +1150,45 @@ def render_match_card(match: dict[str, object]) -> None:
     kickoff = match["kickoff"]
     team_a = str(match["team_a"])
     team_b = str(match["team_b"])
+    group = escape(str(match["group"]))
+    group_class = f"group-{group.lower()}"
+    owner_a = str(match["owner_a"])
+    owner_b = str(match["owner_b"])
+    is_final = match["status"] == "final"
+    is_live = match["status"] == "live"
+    has_score = match["score_a"] is not None and match["score_b"] is not None
+    status_label = str(match["status_label"] or "").strip()
+    if is_final:
+        meta_lead = "Final"
+    elif is_live:
+        meta_lead = f"Live - {status_label}" if status_label else "Live"
+    else:
+        meta_lead = format_time(kickoff)
+
+    if has_score and (is_final or is_live):
+        matchup = (
+            f"{escape(team_a)}"
+            f'<span class="score-chip">{match["score_a"]}-{match["score_b"]}</span>'
+            f"{escape(team_b)}"
+        )
+    else:
+        matchup = f"{escape(team_a)} vs. {escape(team_b)}"
+
     html = (
         '<div class="match-card">'
         '<div class="match-meta">'
-        f'<span>Match {match["match_no"]}</span>'
-        f'<span>Group {escape(str(match["group"]))}</span>'
-        f'<span>{escape(str(match["tv"]))}</span>'
-        f"<span>{escape(format_time(kickoff))}</span>"
+        f"<span>{escape(meta_lead)}</span>"
+        "<span>-</span>"
+        f'<span>{escape(format_tv(str(match["tv"])))}</span>'
         "</div>"
-        f'<div class="match-title">{escape(team_a)} vs. {escape(team_b)}</div>'
-        '<div class="team-row">'
-        f'<div class="team-pill">{team_badge(team_a)}</div>'
-        '<div class="versus">against</div>'
-        f'<div class="team-pill">{team_badge(team_b)}</div>'
+        '<div class="match-title">'
+        f'<span class="group-dot {group_class}">{group}</span>'
+        f'<span class="matchup-text">{matchup}</span>'
+        "</div>"
+        '<div class="player-row">'
+        f"{player_pill(owner_a)}"
+        '<div class="versus">vs</div>'
+        f"{player_pill(owner_b)}"
         "</div>"
         "</div>"
     )
@@ -534,8 +1220,7 @@ def render_day_header(kickoff: datetime, match_count: int) -> None:
     st.markdown(
         (
             '<div class="day-header">'
-            f"{escape(format_day(kickoff))}"
-            f"<span>{match_count} {label}</span>"
+            f"{escape(format_day(kickoff))} - {match_count} {label}"
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -545,17 +1230,20 @@ def render_day_header(kickoff: datetime, match_count: int) -> None:
 def filter_schedule_matches(
     matches: list[dict[str, object]], upcoming_only: bool
 ) -> list[dict[str, object]]:
-    now_et = datetime.now(EASTERN)
     filtered_matches = matches
     if upcoming_only:
         filtered_matches = [
-            match for match in filtered_matches if match["kickoff"] >= now_et
+            match for match in filtered_matches if match["status"] != "final"
         ]
 
     return sorted(filtered_matches, key=lambda match: match["kickoff"])
 
 
-def render_schedule_page(filtered_matches: list[dict[str, object]]) -> None:
+def render_schedule_page(
+    filtered_matches: list[dict[str, object]], score_error: str | None
+) -> None:
+    if score_error:
+        st.warning(score_error)
     if not filtered_matches:
         st.info("No upcoming fixtures are available for this page right now.")
     for _match_day, day_matches in group_matches_by_day(filtered_matches):
@@ -566,7 +1254,7 @@ def render_schedule_page(filtered_matches: list[dict[str, object]]) -> None:
     source_html = (
         '<p class="source-note">'
         f'Fixture source: <a href="{FIXTURE_SOURCE_URL}" target="_blank">FourFourTwo full schedule</a>. '
-        "TV labels were cross-checked from "
+        "Live scores are refreshed from ESPN; TV labels were cross-checked from "
         f'<a href="{TV_SOURCE_URL}" target="_blank">SB Nation\'s Eastern-time schedule</a>. '
         "Known-team coverage is limited to the group stage because knockout opponents depend on group results."
         "</p>"
@@ -574,17 +1262,25 @@ def render_schedule_page(filtered_matches: list[dict[str, object]]) -> None:
     st.markdown(source_html, unsafe_allow_html=True)
 
 
-def render_groups_page(matches: list[dict[str, object]]) -> None:
+def render_groups_page(
+    matches: list[dict[str, object]], records: dict[str, dict[str, int]]
+) -> None:
     cards = []
-    for group, teams in build_groups(matches).items():
+    for group, teams in build_group_standings(matches, records).items():
         rows = "".join(
             (
                 '<div class="team-line">'
-                "<div>"
+                f'<span class="group-dot group-{escape(group.lower())}">{escape(group)}</span>'
+                '<div class="team-summary">'
+                '<div class="team-topline">'
+                '<div class="team-identity">'
                 f'<div class="team-name">{escape(team)}</div>'
                 f'<div class="team-owner">{escape(owner(team))}</div>'
                 "</div>"
-                f'<div class="record-pill">{escape(group_play_record(team))}</div>'
+                f'<div class="record-pill">{escape(format_record_detail(records.get(team, blank_record())))}</div>'
+                "</div>"
+                f"{sweep_meter(records.get(team, blank_record()))}"
+                "</div>"
                 "</div>"
             )
             for team in teams
@@ -599,20 +1295,65 @@ def render_groups_page(matches: list[dict[str, object]]) -> None:
     st.markdown('<div class="page-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
 
 
-def render_players_page() -> None:
+def render_players_page(
+    title_odds: dict[str, dict[str, object]], odds_meta: dict[str, object]
+) -> None:
+    fallback_teams = set(odds_meta.get("fallback_teams", set()))
+    odds_message = odds_meta.get("message")
     cards = []
-    for person, teams in POOL_DRAW.items():
-        team_pills = "".join(
-            f'<span class="player-team">{escape(team)}</span>' for team in teams
+    ranked_players = sorted(
+        POOL_DRAW.items(),
+        key=lambda item: player_title_chance(item[1], title_odds),
+        reverse=True,
+    )
+    for person, teams in ranked_players:
+        pool_chance = player_title_chance(teams, title_odds)
+        sorted_teams = sorted(
+            teams,
+            key=lambda team: float(title_odds.get(team, {}).get("normalized", 0)),
+            reverse=True,
+        )
+        team_rows = "".join(
+            (
+                '<div class="player-team">'
+                "<div>"
+                '<div class="player-team-name">'
+                f'{escape(team)}{"*" if team in fallback_teams else ""}'
+                "</div>"
+                '<div class="player-team-chance">'
+                f'{escape(format_pool_chance(float(title_odds.get(team, {}).get("normalized", 0))))} title share'
+                "</div>"
+                "</div>"
+                f'<span class="odds-pill">{escape(str(title_odds.get(team, {}).get("odds", "N/A")))}</span>'
+                "</div>"
+            )
+            for team in sorted_teams
         )
         cards.append(
             '<div class="panel-card">'
+            '<div class="player-card-head">'
+            "<div>"
             f"<h3>{escape(person)}</h3>"
-            f'<div class="player-teams">{team_pills}</div>'
+            "</div>"
+            '<div class="pool-chance">'
+            "<span>Pool odds</span>"
+            f"<strong>{escape(format_pool_chance(pool_chance))}</strong>"
+            "</div>"
+            "</div>"
+            f'<div class="player-teams">{team_rows}</div>'
             "</div>"
         )
 
     st.markdown('<div class="page-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+    odds_note = f" {escape(str(odds_message))}" if odds_message else ""
+    st.markdown(
+        '<div class="odds-source">'
+        f'Title odds source: <a href="{TITLE_ODDS_SOURCE_URL}" target="_blank">FourFourTwo sweepstake odds</a>. '
+        "Pool odds are normalized implied probabilities across the drawn teams."
+        f"{odds_note}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
@@ -623,7 +1364,7 @@ def main() -> None:
     )
     inject_styles()
 
-    matches = build_matches()
+    base_matches = build_matches()
 
     st.sidebar.header("Navigation")
     page = st.sidebar.radio("Page", ["Group Schedule", "Groups", "Players"])
@@ -631,6 +1372,16 @@ def main() -> None:
     if page == "Group Schedule":
         st.sidebar.divider()
         upcoming_only = st.sidebar.checkbox("Upcoming only", value=True)
+    if page == "Players":
+        st.sidebar.divider()
+        if st.sidebar.button("Refresh title odds"):
+            fetch_title_odds.clear()
+    if st.sidebar.button("Refresh scores"):
+        fetch_live_scores.clear()
+
+    score_results, score_error = fetch_live_scores()
+    matches = enrich_matches_with_scores(base_matches, score_results)
+    records = build_records(matches)
 
     if page == "Group Schedule":
         filtered_matches = filter_schedule_matches(matches, upcoming_only)
@@ -639,13 +1390,16 @@ def main() -> None:
             "Group Play Schedule",
             format_kickoff(next_match["kickoff"]) if next_match else "No upcoming matches",
         )
-        render_schedule_page(filtered_matches)
+        render_schedule_page(filtered_matches, score_error)
     elif page == "Groups":
         render_hero("Groups")
-        render_groups_page(matches)
+        if score_error:
+            st.warning(score_error)
+        render_groups_page(matches, records)
     else:
         render_hero("Players")
-        render_players_page()
+        odds_results, odds_meta = fetch_title_odds()
+        render_players_page(build_title_odds_table(odds_results), odds_meta)
 
 
 if __name__ == "__main__":
