@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections import defaultdict
@@ -7,6 +8,7 @@ from datetime import datetime
 from datetime import timedelta
 from html import escape
 from html import unescape
+from pathlib import Path
 from urllib.request import Request
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
@@ -15,6 +17,7 @@ import streamlit as st
 
 
 EASTERN = ZoneInfo("America/New_York")
+PLAYER_IMAGE_DIR = Path(__file__).parent / "assets" / "players"
 FIXTURE_SOURCE_URL = "https://www.fourfourtwo.com/competition/world-cup-2026-fixtures-and-results"
 TV_SOURCE_URL = "https://www.sbnation.com/soccer/1117513/world-cup-schedule-2026-how-to-watch-every-match-scores-and-more"
 SCORE_SOURCE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260627&limit=200"
@@ -275,16 +278,44 @@ def owner(team: str) -> str:
     return OWNER_BY_TEAM.get(team, "Unclaimed")
 
 
-def player_avatar(person: str) -> str:
+def player_image_path(person: str, mood: str = "normal") -> Path:
+    suffix = "_sad" if mood == "sad" else ""
+    return PLAYER_IMAGE_DIR / f"{person.lower()}{suffix}.jpg"
+
+
+@st.cache_data(show_spinner=False)
+def image_data_uri(path_text: str) -> str | None:
+    path = Path(path_text)
+    if not path.exists():
+        return None
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def player_avatar(person: str, mood: str = "normal") -> str:
+    image_path = player_image_path(person, mood)
+    data_uri = image_data_uri(str(image_path))
+    if data_uri:
+        return f'<img src="{data_uri}" alt="{escape(person)}">'
     return escape(person[:1].upper())
 
 
-def player_pill(person: str) -> str:
+def player_pill(person: str, mood: str = "normal") -> str:
     color = PLAYER_COLORS.get(person, PLAYER_COLORS["Unclaimed"])
     return (
         f'<div class="player-pill" style="--avatar-color: {color};">'
-        f'<span class="player-avatar">{player_avatar(person)}</span>'
+        f'<span class="player-avatar">{player_avatar(person, mood)}</span>'
         f"<span>{escape(person)}</span>"
+        "</div>"
+    )
+
+
+def avatar_nameplate(person: str, mood: str = "normal", size: str = "medium") -> str:
+    color = PLAYER_COLORS.get(person, PLAYER_COLORS["Unclaimed"])
+    return (
+        f'<div class="avatar-nameplate avatar-{escape(size)}" style="--avatar-color: {color};">'
+        f'<div class="avatar-photo">{player_avatar(person, mood)}</div>'
+        f'<div class="avatar-label">{escape(person)}</div>'
         "</div>"
     )
 
@@ -648,6 +679,89 @@ def build_group_standings(
     return standings
 
 
+def player_details_html(
+    person: str,
+    title_odds: dict[str, dict[str, object]],
+    odds_meta: dict[str, object],
+) -> str:
+    fallback_teams = set(odds_meta.get("fallback_teams", set()))
+    teams = sorted(
+        POOL_DRAW.get(person, []),
+        key=lambda team: float(title_odds.get(team, {}).get("normalized", 0)),
+        reverse=True,
+    )
+    team_rows = "".join(
+        (
+            '<div class="popup-row">'
+            '<div>'
+            f'<strong>{escape(team)}{"*" if team in fallback_teams else ""}</strong>'
+            f'<span>{escape(format_pool_chance(float(title_odds.get(team, {}).get("normalized", 0))))} title share</span>'
+            "</div>"
+            f'<b>{escape(str(title_odds.get(team, {}).get("odds", "N/A")))}</b>'
+            "</div>"
+        )
+        for team in teams
+    )
+    pool_chance = format_pool_chance(player_title_chance(teams, title_odds))
+    return (
+        '<div class="popup-panel player-popup-panel">'
+        f'<div class="popup-title">{escape(person)} pool</div>'
+        f'<div class="popup-kpi">{escape(pool_chance)} chance this pool has the champion</div>'
+        f"{team_rows}"
+        "</div>"
+    )
+
+
+def player_popover(
+    person: str,
+    mood: str,
+    title_odds: dict[str, dict[str, object]],
+    odds_meta: dict[str, object],
+    size: str = "medium",
+) -> str:
+    return (
+        '<details class="click-popover player-popover">'
+        f"<summary>{avatar_nameplate(person, mood, size)}</summary>"
+        f"{player_details_html(person, title_odds, odds_meta)}"
+        "</details>"
+    )
+
+
+def group_details_html(
+    group: str, matches: list[dict[str, object]], records: dict[str, dict[str, int]]
+) -> str:
+    teams = build_group_standings(matches, records).get(group, [])
+    rows = "".join(
+        (
+            '<div class="popup-row">'
+            "<div>"
+            f"<strong>{escape(team)}</strong>"
+            f"<span>{escape(owner(team))}</span>"
+            "</div>"
+            f"<b>{escape(format_record_detail(records.get(team, blank_record())))}</b>"
+            "</div>"
+        )
+        for team in teams
+    )
+    return (
+        '<div class="popup-panel group-popup-panel">'
+        f'<div class="popup-title">Group {escape(group)} standings</div>'
+        f"{rows}"
+        "</div>"
+    )
+
+
+def group_popover(
+    group: str, matches: list[dict[str, object]], records: dict[str, dict[str, int]]
+) -> str:
+    return (
+        '<details class="click-popover group-popover">'
+        f'<summary class="group-trigger group-{escape(group.lower())}">{escape(group)}</summary>'
+        f"{group_details_html(group, matches, records)}"
+        "</details>"
+    )
+
+
 def group_matches_by_day(
     matches: list[dict[str, object]]
 ) -> list[tuple[object, list[dict[str, object]]]]:
@@ -744,11 +858,12 @@ def inject_styles() -> None:
 
         .match-card {
             position: relative;
-            overflow: hidden;
+            overflow: visible;
             border: 1px solid rgba(16, 35, 28, 0.12);
-            border-radius: 24px;
-            padding: 1.05rem 1.2rem 1.15rem;
-            margin: 0.65rem 0;
+            border-radius: 30px;
+            padding: 1.35rem 1.45rem 1.5rem;
+            margin: 0.9rem 0 1.35rem;
+            min-height: 23rem;
             background: rgba(255, 255, 255, 0.78);
             box-shadow: 0 18px 42px rgba(16, 35, 28, 0.10);
             backdrop-filter: blur(10px);
@@ -766,6 +881,7 @@ def inject_styles() -> None:
             display: flex;
             flex-wrap: wrap;
             gap: 0.55rem;
+            padding-right: 4rem;
             color: rgba(16, 35, 28, 0.62);
             font-size: 0.9rem;
             font-weight: 900;
@@ -787,9 +903,10 @@ def inject_styles() -> None:
             display: flex;
             align-items: center;
             gap: 0.65rem;
-            font-size: clamp(1.3rem, 3vw, 2rem);
+            font-size: clamp(1.75rem, 4vw, 3.1rem);
             font-weight: 800;
-            margin: 0.38rem 0 0.85rem;
+            margin: 0.52rem 4rem 1.25rem 0;
+            line-height: 0.98;
         }
 
         .group-dot {
@@ -845,6 +962,181 @@ def inject_styles() -> None:
             gap: 0.55rem;
         }
 
+        .match-avatars {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+            gap: clamp(1rem, 4vw, 3rem);
+            margin-top: 1.35rem;
+        }
+
+        .avatar-nameplate {
+            --avatar-size: 172px;
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: calc(var(--avatar-size) + 18px);
+            color: #10231c;
+            text-align: center;
+        }
+
+        .avatar-photo {
+            display: grid;
+            place-items: center;
+            width: var(--avatar-size);
+            height: var(--avatar-size);
+            overflow: hidden;
+            border-radius: 999px;
+            background: var(--avatar-color);
+            color: #10231c;
+            border: 7px solid rgba(255, 255, 255, 0.92);
+            box-shadow: 0 16px 34px rgba(16, 35, 28, 0.22);
+            font-size: calc(var(--avatar-size) * 0.42);
+            font-weight: 900;
+        }
+
+        .avatar-photo img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+
+        .avatar-label {
+            position: relative;
+            z-index: 1;
+            margin-top: -1.15rem;
+            border-radius: 999px;
+            padding: 0.45rem 1.2rem;
+            min-width: 7.2rem;
+            background: #10231c;
+            color: white;
+            font-weight: 900;
+            box-shadow: 0 10px 22px rgba(16, 35, 28, 0.22);
+        }
+
+        .avatar-small {
+            --avatar-size: 70px;
+            min-width: 5rem;
+        }
+
+        .avatar-small .avatar-photo {
+            border-width: 4px;
+            box-shadow: 0 8px 18px rgba(16, 35, 28, 0.18);
+        }
+
+        .avatar-small .avatar-label {
+            min-width: 4.6rem;
+            margin-top: -0.75rem;
+            padding: 0.28rem 0.65rem;
+            font-size: 0.76rem;
+        }
+
+        .click-popover {
+            position: relative;
+            display: inline-block;
+        }
+
+        .click-popover > summary {
+            list-style: none;
+            cursor: pointer;
+        }
+
+        .click-popover > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .popup-panel {
+            position: absolute;
+            z-index: 30;
+            min-width: 17rem;
+            max-width: min(22rem, calc(100vw - 2rem));
+            border-radius: 20px;
+            padding: 0.85rem;
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid rgba(16, 35, 28, 0.14);
+            box-shadow: 0 24px 58px rgba(16, 35, 28, 0.22);
+            color: #10231c;
+            text-align: left;
+        }
+
+        .player-popup-panel {
+            top: calc(100% + 0.8rem);
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .group-popup {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            z-index: 20;
+        }
+
+        .group-popup-panel {
+            top: calc(100% + 0.65rem);
+            right: 0;
+        }
+
+        .group-trigger {
+            display: inline-grid;
+            place-items: center;
+            width: 2.65rem;
+            height: 2.65rem;
+            border-radius: 999px;
+            color: white;
+            font-size: 1.12rem;
+            font-weight: 900;
+            box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.16), 0 10px 20px rgba(16, 35, 28, 0.14);
+        }
+
+        .popup-title {
+            margin-bottom: 0.5rem;
+            font-size: 0.92rem;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(16, 35, 28, 0.66);
+        }
+
+        .popup-kpi {
+            margin-bottom: 0.65rem;
+            border-radius: 14px;
+            padding: 0.55rem 0.65rem;
+            background: var(--lime);
+            font-weight: 900;
+        }
+
+        .popup-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+            border-top: 1px solid rgba(16, 35, 28, 0.08);
+            padding: 0.48rem 0;
+        }
+
+        .popup-row:first-of-type {
+            border-top: 0;
+        }
+
+        .popup-row strong,
+        .popup-row span {
+            display: block;
+        }
+
+        .popup-row span {
+            color: rgba(16, 35, 28, 0.58);
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .popup-row b {
+            white-space: nowrap;
+            font-size: 0.82rem;
+        }
+
         .player-pill {
             display: inline-flex;
             align-items: center;
@@ -866,6 +1158,15 @@ def inject_styles() -> None:
             color: #10231c;
             font-size: 0.78rem;
             font-weight: 900;
+            overflow: hidden;
+            flex: 0 0 auto;
+        }
+
+        .player-avatar img {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
         }
 
         .versus {
@@ -1049,6 +1350,37 @@ def inject_styles() -> None:
         }
 
         @media (max-width: 760px) {
+            .match-card {
+                min-height: 0;
+                padding: 1.15rem;
+            }
+
+            .match-title {
+                margin-right: 3.2rem;
+            }
+
+            .avatar-nameplate {
+                --avatar-size: 124px;
+                min-width: 8.2rem;
+            }
+
+            .avatar-label {
+                min-width: 5.7rem;
+            }
+
+            .match-avatars {
+                gap: 0.75rem;
+            }
+
+            .popup-panel {
+                min-width: min(17rem, calc(100vw - 2rem));
+            }
+
+            .player-popup-panel {
+                left: 0;
+                transform: none;
+            }
+
             .team-topline {
                 flex-direction: column;
                 gap: 0.35rem;
@@ -1146,18 +1478,32 @@ def inject_styles() -> None:
     )
 
 
-def render_match_card(match: dict[str, object]) -> None:
+def render_match_card(
+    match: dict[str, object],
+    matches: list[dict[str, object]],
+    records: dict[str, dict[str, int]],
+    title_odds: dict[str, dict[str, object]],
+    odds_meta: dict[str, object],
+) -> None:
     kickoff = match["kickoff"]
     team_a = str(match["team_a"])
     team_b = str(match["team_b"])
-    group = escape(str(match["group"]))
-    group_class = f"group-{group.lower()}"
+    group = str(match["group"])
     owner_a = str(match["owner_a"])
     owner_b = str(match["owner_b"])
     is_final = match["status"] == "final"
     is_live = match["status"] == "live"
     has_score = match["score_a"] is not None and match["score_b"] is not None
     status_label = str(match["status_label"] or "").strip()
+    mood_a = "normal"
+    mood_b = "normal"
+    if is_final and has_score:
+        score_a = int(match["score_a"])
+        score_b = int(match["score_b"])
+        if score_a < score_b:
+            mood_a = "sad"
+        elif score_b < score_a:
+            mood_b = "sad"
     if is_final:
         meta_lead = "Final"
     elif is_live:
@@ -1176,19 +1522,19 @@ def render_match_card(match: dict[str, object]) -> None:
 
     html = (
         '<div class="match-card">'
+        f"{group_popover(group, matches, records)}"
         '<div class="match-meta">'
         f"<span>{escape(meta_lead)}</span>"
         "<span>-</span>"
         f'<span>{escape(format_tv(str(match["tv"])))}</span>'
         "</div>"
         '<div class="match-title">'
-        f'<span class="group-dot {group_class}">{group}</span>'
         f'<span class="matchup-text">{matchup}</span>'
         "</div>"
-        '<div class="player-row">'
-        f"{player_pill(owner_a)}"
+        '<div class="match-avatars">'
+        f"{player_popover(owner_a, mood_a, title_odds, odds_meta, 'medium')}"
         '<div class="versus">vs</div>'
-        f"{player_pill(owner_b)}"
+        f"{player_popover(owner_b, mood_b, title_odds, odds_meta, 'medium')}"
         "</div>"
         "</div>"
     )
@@ -1240,7 +1586,12 @@ def filter_schedule_matches(
 
 
 def render_schedule_page(
-    filtered_matches: list[dict[str, object]], score_error: str | None
+    filtered_matches: list[dict[str, object]],
+    all_matches: list[dict[str, object]],
+    records: dict[str, dict[str, int]],
+    title_odds: dict[str, dict[str, object]],
+    odds_meta: dict[str, object],
+    score_error: str | None,
 ) -> None:
     if score_error:
         st.warning(score_error)
@@ -1249,13 +1600,18 @@ def render_schedule_page(
     for _match_day, day_matches in group_matches_by_day(filtered_matches):
         render_day_header(day_matches[0]["kickoff"], len(day_matches))
         for match in day_matches:
-            render_match_card(match)
+            render_match_card(match, all_matches, records, title_odds, odds_meta)
 
+    odds_note = (
+        f" {escape(str(odds_meta.get('message')))}" if odds_meta.get("message") else ""
+    )
     source_html = (
         '<p class="source-note">'
         f'Fixture source: <a href="{FIXTURE_SOURCE_URL}" target="_blank">FourFourTwo full schedule</a>. '
         "Live scores are refreshed from ESPN; TV labels were cross-checked from "
         f'<a href="{TV_SOURCE_URL}" target="_blank">SB Nation\'s Eastern-time schedule</a>. '
+        f'Title odds source: <a href="{TITLE_ODDS_SOURCE_URL}" target="_blank">FourFourTwo sweepstake odds</a>.'
+        f"{odds_note} "
         "Known-team coverage is limited to the group stage because knockout opponents depend on group results."
         "</p>"
     )
@@ -1263,14 +1619,17 @@ def render_schedule_page(
 
 
 def render_groups_page(
-    matches: list[dict[str, object]], records: dict[str, dict[str, int]]
+    matches: list[dict[str, object]],
+    records: dict[str, dict[str, int]],
+    title_odds: dict[str, dict[str, object]],
+    odds_meta: dict[str, object],
 ) -> None:
     cards = []
     for group, teams in build_group_standings(matches, records).items():
         rows = "".join(
             (
                 '<div class="team-line">'
-                f'<span class="group-dot group-{escape(group.lower())}">{escape(group)}</span>'
+                f"{player_popover(owner(team), 'normal', title_odds, odds_meta, 'small')}"
                 '<div class="team-summary">'
                 '<div class="team-topline">'
                 '<div class="team-identity">'
@@ -1372,16 +1731,17 @@ def main() -> None:
     if page == "Group Schedule":
         st.sidebar.divider()
         upcoming_only = st.sidebar.checkbox("Upcoming only", value=True)
-    if page == "Players":
-        st.sidebar.divider()
-        if st.sidebar.button("Refresh title odds"):
-            fetch_title_odds.clear()
+    st.sidebar.divider()
+    if st.sidebar.button("Refresh title odds"):
+        fetch_title_odds.clear()
     if st.sidebar.button("Refresh scores"):
         fetch_live_scores.clear()
 
     score_results, score_error = fetch_live_scores()
     matches = enrich_matches_with_scores(base_matches, score_results)
     records = build_records(matches)
+    odds_results, odds_meta = fetch_title_odds()
+    title_odds = build_title_odds_table(odds_results)
 
     if page == "Group Schedule":
         filtered_matches = filter_schedule_matches(matches, upcoming_only)
@@ -1390,16 +1750,17 @@ def main() -> None:
             "Group Play Schedule",
             format_kickoff(next_match["kickoff"]) if next_match else "No upcoming matches",
         )
-        render_schedule_page(filtered_matches, score_error)
+        render_schedule_page(
+            filtered_matches, matches, records, title_odds, odds_meta, score_error
+        )
     elif page == "Groups":
         render_hero("Groups")
         if score_error:
             st.warning(score_error)
-        render_groups_page(matches, records)
+        render_groups_page(matches, records, title_odds, odds_meta)
     else:
         render_hero("Players")
-        odds_results, odds_meta = fetch_title_odds()
-        render_players_page(build_title_odds_table(odds_results), odds_meta)
+        render_players_page(title_odds, odds_meta)
 
 
 if __name__ == "__main__":
