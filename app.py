@@ -858,6 +858,7 @@ def inject_styles() -> None:
 
         .match-card {
             position: relative;
+            z-index: 1;
             overflow: visible;
             border: 1px solid rgba(16, 35, 28, 0.12);
             border-radius: 30px;
@@ -867,6 +868,10 @@ def inject_styles() -> None:
             background: rgba(255, 255, 255, 0.78);
             box-shadow: 0 18px 42px rgba(16, 35, 28, 0.10);
             backdrop-filter: blur(10px);
+        }
+
+        .match-card:has(.click-popover[open]) {
+            z-index: 80;
         }
 
         .match-card::before {
