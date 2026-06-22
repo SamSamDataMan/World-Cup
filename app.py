@@ -21,7 +21,6 @@ PLAYER_IMAGE_DIR = Path(__file__).parent / "assets" / "players"
 FIXTURE_SOURCE_URL = "https://www.fourfourtwo.com/competition/world-cup-2026-fixtures-and-results"
 TV_SOURCE_URL = "https://www.sbnation.com/soccer/1117513/world-cup-schedule-2026-how-to-watch-every-match-scores-and-more"
 SCORE_SOURCE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260627&limit=200"
-NO_SWEEP_MEME_URL = "https://i.kym-cdn.com/photos/images/newsfeed/000/538/462/358.jpg"
 TITLE_ODDS_SOURCE_URL = "https://www.fourfourtwo.com/competition/world-cup-2026-sweepstakes-kit-download-and-print-our-sweepstake-template"
 
 POOL_DRAW = {
@@ -608,14 +607,15 @@ def sweep_status(record: dict[str, int]) -> dict[str, object]:
     impossible = record["draws"] > 0 or record["losses"] > 0
     if impossible:
         return {
-            "label": "Sweep impossible",
+            "label": "Sweep ended",
             "class": "is-dead",
             "progress": 0,
-            "width": "100%",
+            "width": "0%",
         }
+    meter_class = "is-charged" if wins == 2 else "is-live"
     return {
         "label": f"Sweep {wins}/3",
-        "class": "is-live",
+        "class": meter_class,
         "progress": wins,
         "width": f"{min(wins, 3) / 3 * 100:.0f}%",
     }
@@ -624,14 +624,6 @@ def sweep_status(record: dict[str, int]) -> dict[str, object]:
 def sweep_meter(record: dict[str, int]) -> str:
     status = sweep_status(record)
     label = escape(str(status["label"]))
-    copy_html = (
-        '<div class="sweep-meme" aria-label="No sweep for you">'
-        f'<img src="{NO_SWEEP_MEME_URL}" alt="No sweep for you meme">'
-        '<span>No sweep for you!!!</span>'
-        "</div>"
-        if status["class"] == "is-dead"
-        else f'<div class="sweep-copy"><span>{label}</span></div>'
-    )
     ticks = "".join(
         '<span class="sweep-tick is-filled"></span>'
         if index < int(status["progress"])
@@ -640,7 +632,7 @@ def sweep_meter(record: dict[str, int]) -> str:
     )
     return (
         f'<div class="sweep-meter {status["class"]}">'
-        f"{copy_html}"
+        f'<div class="sweep-copy"><span>{label}</span></div>'
         '<div class="sweep-track">'
         f'<div class="sweep-fill" style="width: {status["width"]};"></div>'
         f"{ticks}"
@@ -1270,42 +1262,6 @@ def inject_styles() -> None:
             margin-bottom: 0.25rem;
         }
 
-        .sweep-meme {
-            position: relative;
-            width: 4.6rem;
-            height: 3.15rem;
-            margin: -0.15rem auto 0.18rem;
-            overflow: hidden;
-            border-radius: 0.55rem;
-            border: 2px solid rgba(255, 255, 255, 0.86);
-            box-shadow: 0 5px 12px rgba(16, 35, 28, 0.16);
-            background: #10231c;
-        }
-
-        .sweep-meme img {
-            width: 100%;
-            height: 100%;
-            display: block;
-            object-fit: cover;
-        }
-
-        .sweep-meme span {
-            position: absolute;
-            inset: auto 0.18rem 0.12rem;
-            color: #ffffff;
-            font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif;
-            font-size: 0.48rem;
-            line-height: 0.9;
-            text-align: center;
-            text-transform: uppercase;
-            letter-spacing: 0.02em;
-            text-shadow:
-                -1px -1px 0 #000,
-                1px -1px 0 #000,
-                -1px 1px 0 #000,
-                1px 1px 0 #000;
-        }
-
         .sweep-track {
             position: relative;
             display: grid;
@@ -1315,6 +1271,18 @@ def inject_styles() -> None:
             border-radius: 999px;
             padding: 0.18rem;
             background: rgba(16, 35, 28, 0.10);
+        }
+
+        .sweep-track::after {
+            content: "";
+            position: absolute;
+            inset: -40% auto -40% -35%;
+            width: 38%;
+            z-index: 2;
+            transform: skewX(-18deg);
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.82), transparent);
+            opacity: 0;
+            pointer-events: none;
         }
 
         .sweep-fill {
@@ -1336,6 +1304,55 @@ def inject_styles() -> None:
 
         .sweep-tick.is-filled {
             background: #10231c;
+        }
+
+        .sweep-meter.is-charged .sweep-copy {
+            color: #0f6b42;
+            text-shadow: 0 0 14px rgba(214, 255, 121, 0.7);
+        }
+
+        .sweep-meter.is-charged .sweep-track {
+            background: rgba(214, 255, 121, 0.28);
+            box-shadow:
+                0 0 0 1px rgba(15, 107, 66, 0.12),
+                0 0 22px rgba(214, 255, 121, 0.72);
+        }
+
+        .sweep-meter.is-charged .sweep-track::after {
+            animation: sweep-spark 1.4s ease-in-out infinite;
+        }
+
+        .sweep-meter.is-charged .sweep-fill {
+            background: linear-gradient(90deg, #d6ff79, #5cff9a, #d6ff79);
+            background-size: 220% 100%;
+            animation: sweep-charge 1.2s linear infinite;
+        }
+
+        .sweep-meter.is-charged .sweep-tick.is-filled {
+            background: #082d20;
+            box-shadow: 0 0 12px rgba(214, 255, 121, 0.95);
+        }
+
+        @keyframes sweep-charge {
+            from { background-position: 0% 50%; }
+            to { background-position: 220% 50%; }
+        }
+
+        @keyframes sweep-spark {
+            0% {
+                left: -35%;
+                opacity: 0;
+            }
+            28% {
+                opacity: 0.9;
+            }
+            65% {
+                opacity: 0;
+            }
+            100% {
+                left: 105%;
+                opacity: 0;
+            }
         }
 
         .sweep-meter.is-dead .sweep-fill {
