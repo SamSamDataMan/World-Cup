@@ -612,7 +612,12 @@ def sweep_status(record: dict[str, int]) -> dict[str, object]:
             "progress": 0,
             "width": "0%",
         }
-    meter_class = "is-charged" if wins == 2 else "is-live"
+    if wins >= 3:
+        meter_class = "is-complete"
+    elif wins == 2:
+        meter_class = "is-charged"
+    else:
+        meter_class = "is-live"
     return {
         "label": f"Sweep {wins}/3",
         "class": meter_class,
@@ -862,8 +867,9 @@ def inject_styles() -> None:
             backdrop-filter: blur(10px);
         }
 
-        .match-card:has(.click-popover[open]) {
-            z-index: 80;
+        .match-card:has(.click-popover[open]),
+        .panel-card:has(.click-popover[open]) {
+            z-index: 999900;
         }
 
         .match-card::before {
@@ -1014,25 +1020,29 @@ def inject_styles() -> None:
         }
 
         .avatar-small {
-            --avatar-size: 70px;
-            min-width: 5rem;
+            --avatar-size: 46px;
+            min-width: 3.6rem;
         }
 
         .avatar-small .avatar-photo {
-            border-width: 4px;
-            box-shadow: 0 8px 18px rgba(16, 35, 28, 0.18);
+            border-width: 3px;
+            box-shadow: 0 6px 14px rgba(16, 35, 28, 0.16);
         }
 
         .avatar-small .avatar-label {
-            min-width: 4.6rem;
-            margin-top: -0.75rem;
-            padding: 0.28rem 0.65rem;
-            font-size: 0.76rem;
+            min-width: 3.2rem;
+            margin-top: -0.42rem;
+            padding: 0.16rem 0.42rem;
+            font-size: 0.64rem;
         }
 
         .click-popover {
             position: relative;
             display: inline-block;
+        }
+
+        .click-popover[open] {
+            z-index: 1000000;
         }
 
         .click-popover > summary {
@@ -1045,23 +1055,23 @@ def inject_styles() -> None:
         }
 
         .popup-panel {
-            position: absolute;
-            z-index: 30;
-            min-width: 17rem;
-            max-width: min(22rem, calc(100vw - 2rem));
-            border-radius: 20px;
-            padding: 0.85rem;
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid rgba(16, 35, 28, 0.14);
-            box-shadow: 0 24px 58px rgba(16, 35, 28, 0.22);
+            position: fixed;
+            z-index: 1000000;
+            top: 50%;
+            left: 50%;
+            width: min(24rem, calc(100vw - 1.5rem));
+            max-height: min(40rem, calc(100dvh - 1.5rem));
+            overflow: auto;
+            transform: translate(-50%, -50%);
+            border-radius: 24px;
+            padding: 1rem;
+            background: rgba(255, 255, 255, 0.98);
+            border: 1px solid rgba(16, 35, 28, 0.16);
+            box-shadow: 0 34px 90px rgba(16, 35, 28, 0.38);
             color: #10231c;
             text-align: left;
-        }
-
-        .player-popup-panel {
-            top: calc(100% + 0.8rem);
-            left: 50%;
-            transform: translateX(-50%);
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
 
         .group-popup {
@@ -1069,11 +1079,6 @@ def inject_styles() -> None:
             top: 1rem;
             right: 1rem;
             z-index: 20;
-        }
-
-        .group-popup-panel {
-            top: calc(100% + 0.65rem);
-            right: 0;
         }
 
         .group-trigger {
@@ -1184,6 +1189,7 @@ def inject_styles() -> None:
         }
 
         .panel-card {
+            position: relative;
             border: 1px solid rgba(16, 35, 28, 0.12);
             border-radius: 24px;
             padding: 1.15rem;
@@ -1199,8 +1205,8 @@ def inject_styles() -> None:
         .team-line {
             display: grid;
             grid-template-columns: auto minmax(0, 1fr);
-            gap: 0.75rem;
-            align-items: start;
+            gap: 0.65rem;
+            align-items: center;
             border-top: 1px solid rgba(16, 35, 28, 0.10);
             padding: 0.65rem 0;
         }
@@ -1216,8 +1222,8 @@ def inject_styles() -> None:
         .team-topline {
             display: flex;
             align-items: flex-start;
-            justify-content: space-between;
-            gap: 0.75rem;
+            justify-content: flex-start;
+            gap: 0.5rem;
         }
 
         .team-identity {
@@ -1227,6 +1233,13 @@ def inject_styles() -> None:
         .team-name {
             font-weight: 800;
             line-height: 1.15;
+        }
+
+        .team-title-line {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.42rem;
         }
 
         .team-owner {
@@ -1243,7 +1256,6 @@ def inject_styles() -> None:
             font-size: 0.72rem;
             white-space: nowrap;
             line-height: 1;
-            margin-top: 0.12rem;
         }
 
         .sweep-meter {
@@ -1333,6 +1345,38 @@ def inject_styles() -> None:
             box-shadow: 0 0 12px rgba(214, 255, 121, 0.95);
         }
 
+        .sweep-meter.is-complete .sweep-copy {
+            color: #7a4f00;
+            text-shadow: 0 1px 0 rgba(255, 255, 255, 0.45);
+        }
+
+        .sweep-meter.is-complete .sweep-track {
+            background: linear-gradient(180deg, #7a4f00, #3d2700);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.42),
+                0 0 0 1px rgba(122, 79, 0, 0.24),
+                0 0 24px rgba(255, 201, 71, 0.72);
+        }
+
+        .sweep-meter.is-complete .sweep-track::after {
+            display: none;
+            animation: none;
+        }
+
+        .sweep-meter.is-complete .sweep-fill {
+            background: linear-gradient(180deg, #ffe889, #ffc947 42%, #c88400);
+            animation: none;
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        }
+
+        .sweep-meter.is-complete .sweep-tick.is-filled {
+            background: #7a4f00;
+            border-color: rgba(255, 232, 137, 0.55);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.35),
+                0 0 10px rgba(255, 201, 71, 0.75);
+        }
+
         @keyframes sweep-charge {
             from { background-position: 0% 50%; }
             to { background-position: 220% 50%; }
@@ -1392,15 +1436,6 @@ def inject_styles() -> None:
 
             .match-avatars {
                 gap: 0.75rem;
-            }
-
-            .popup-panel {
-                min-width: min(17rem, calc(100vw - 2rem));
-            }
-
-            .player-popup-panel {
-                left: 0;
-                transform: none;
             }
 
             .team-topline {
@@ -1655,10 +1690,11 @@ def render_groups_page(
                 '<div class="team-summary">'
                 '<div class="team-topline">'
                 '<div class="team-identity">'
-                f'<div class="team-name">{escape(team)}</div>'
-                f'<div class="team-owner">{escape(owner(team))}</div>'
-                "</div>"
+                '<div class="team-title-line">'
+                f'<span class="team-name">{escape(team)}</span>'
                 f'<div class="record-pill">{escape(format_record_detail(records.get(team, blank_record())))}</div>'
+                "</div>"
+                "</div>"
                 "</div>"
                 f"{sweep_meter(records.get(team, blank_record()))}"
                 "</div>"
